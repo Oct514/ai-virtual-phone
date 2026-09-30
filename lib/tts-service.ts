@@ -25,6 +25,7 @@ export function resolveVoiceConfig(characterId: string, appId?: ContentAppId): V
  * Supported providers:
  * - Minimax: REST API → hex-encoded mp3
  * - OpenAI: REST API → binary audio blob
+ * - ElevenLabs: REST API → binary audio blob
  */
 export async function synthesizeSpeech(
     text: string,
@@ -41,6 +42,10 @@ export async function synthesizeSpeech(
 
     if (provider === "OpenAI") {
         return synthesizeOpenAI(text, voiceConfig);
+    }
+
+    if (provider === "ElevenLabs") {
+        return synthesizeElevenLabs(text, voiceConfig);
     }
 
     return null;
@@ -168,6 +173,61 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
     if (!response.ok) {
         const errText = await response.text().catch(() => "");
         throw new Error(`OpenAI TTS 请求失败 (${response.status}): ${errText}`);
+    }
+
+    const blob = await response.blob();
+    return new Blob([await blob.arrayBuffer()], { type: "audio/mpeg" });
+}
+
+// ── ElevenLabs TTS ──────────────────────────────────
+
+const DEFAULT_ELEVENLABS_BASE_URL = "https://api.elevenlabs.io/v1";
+const DEFAULT_ELEVENLABS_MODEL = "eleven_multilingual_v2";
+// ElevenLabs voice_settings.speed 官方范围 0.7–1.2，超出会被接口拒绝，这里夹住。
+const ELEVENLABS_SPEED_MIN = 0.7;
+const ELEVENLABS_SPEED_MAX = 1.2;
+
+function normalizeElevenLabsSpeed(speed: number | undefined): number {
+    if (typeof speed !== "number" || !Number.isFinite(speed)) return 1.0;
+    return Math.min(ELEVENLABS_SPEED_MAX, Math.max(ELEVENLABS_SPEED_MIN, speed));
+}
+
+async function synthesizeElevenLabs(text: string, config: VoiceApiConfig): Promise<Blob | null> {
+    if (!config.apiKey) throw new Error("ElevenLabs API Key 未配置");
+
+    const baseUrl = (config.baseUrl || DEFAULT_ELEVENLABS_BASE_URL).replace(/\/+$/, "");
+    const voiceId = (config.defaultVoice || "").trim();
+    if (!voiceId) throw new Error("请先填写 ElevenLabs Voice ID（可在音色列表里同步后选择）");
+
+    const response = await fetchWithTimeout(`${baseUrl}/text-to-speech/${encodeURIComponent(voiceId)}`, {
+        method: "POST",
+        headers: {
+            "xi-api-key": config.apiKey,
+            "Content-Type": "application/json",
+            Accept: "audio/mpeg",
+        },
+        body: JSON.stringify({
+            text,
+            model_id: config.model || DEFAULT_ELEVENLABS_MODEL,
+            voice_settings: {
+                speed: normalizeElevenLabsSpeed(config.speechSpeed),
+            },
+        }),
+    });
+
+    if (!response.ok) {
+        const raw = await response.text().catch(() => "");
+        // ElevenLabs 的错误体是 { detail: { status, message } }，detail 偶尔直接是字符串
+        let message = raw.slice(0, 300);
+        try {
+            const parsed = JSON.parse(raw) as { detail?: unknown };
+            const detail = parsed?.detail;
+            if (typeof detail === "string" && detail) message = detail;
+            else if (detail && typeof detail === "object" && typeof (detail as { message?: unknown }).message === "string") {
+                message = (detail as { message: string }).message;
+            }
+        } catch { /* 上游不一定回 JSON */ }
+        throw new Error(`ElevenLabs 语音合成失败 (${response.status}): ${message}`);
     }
 
     const blob = await response.blob();
