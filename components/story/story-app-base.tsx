@@ -49,9 +49,12 @@ import {
 } from "@/lib/story-engine";
 import {
   createOrGetStorySession,
+  createStorySession,
+  deleteStorySession,
   hydrateStoryStorage,
   loadStoryMessages,
   loadStorySessions,
+  loadStorySessionsByCharacter,
   pushStoryMessage,
   deleteStoryMessage,
   deleteStoryMessagesFrom,
@@ -136,6 +139,19 @@ function getStoryPreview(messages: StoryMessage[]): string {
   // Strip HTML tags and collapse whitespace for preview text
   const text = source.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   return text.slice(0, 60) || "继续上次的场景。";
+}
+
+/** 剧情线列表标题：有自定义标题用标题，否则按序号兜底。 */
+function getStorySessionLabel(session: StorySession, index: number): string {
+  const title = session.title?.trim();
+  return title || `剧情 ${index + 1}`;
+}
+
+/** 剧情线列表副标题：用最近一条消息的预览，方便区分多条剧情。 */
+function getStorySessionPreview(session: StorySession): string {
+  const preview = session.lastMessagePreview?.replace(/\s+/g, " ").trim();
+  if (!preview) return "还没有内容";
+  return preview.length > 26 ? `${preview.slice(0, 26)}…` : preview;
 }
 
 function resizeStoryComposerTextarea(el: HTMLTextAreaElement) {
@@ -274,6 +290,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [ready, setReady] = useState(false);
   const [, setStorageVersion] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // 删除剧情线走两步确认（第二次点击才真删），避免误删整条剧情
+  const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null);
   const [activeCharacterId, setActiveCharacterId] = useState<string>("");
   const [activeSessionId, setActiveSessionId] = useState<string>("");
   const [messages, setMessages] = useState<StoryMessage[]>([]);
@@ -315,6 +333,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
     [characters, activeCharacterId]
   );
   const sessions = loadStorySessions();
+  // 当前角色卡名下的全部剧情线（同一角色卡可以并存多条）
+  const characterSessions = activeCharacterId ? loadStorySessionsByCharacter(activeCharacterId) : [];
   const currentSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) || null,
     [sessions, activeSessionId]
@@ -329,6 +349,18 @@ export function StoryApp({ onClose }: StoryAppProps) {
       if (on) next.add(sessionId); else next.delete(sessionId);
       return next;
     });
+  }, []);
+
+  // 切换到某条剧情线：消息、草稿、会话配置一起切过来
+  const activateSession = useCallback((session: StorySession) => {
+    setActiveSessionId(session.id);
+    activeSessionIdRef.current = session.id; // 同步更新，堵住生成完成回调的守卫空窗
+    setVisibleMessageCount(STORY_INITIAL_LOAD);
+    setMessages(loadStoryMessages(session.id));
+    setCustomCssDraft(session.customCSS || "");
+    setFoldTagsDraft(session.foldTags ?? "think,thinking");
+    setContextExcludedTagsDraft(session.contextExcludedTags ?? "think,thinking");
+    setStorageVersion((value) => value + 1);
   }, []);
 
   useEffect(() => {
@@ -347,31 +379,17 @@ export function StoryApp({ onClose }: StoryAppProps) {
       if (initialChar) {
         const session = createOrGetStorySession(initialChar);
         setActiveCharacterId(initialChar);
-        setActiveSessionId(session.id);
-        activeSessionIdRef.current = session.id; // 同步更新，堵住生成完成回调的守卫空窗
-        setVisibleMessageCount(STORY_INITIAL_LOAD);
-        setMessages(loadStoryMessages(session.id));
-        setCustomCssDraft(session.customCSS || "");
-        setFoldTagsDraft(session.foldTags ?? "think,thinking");
-        setContextExcludedTagsDraft(session.contextExcludedTags ?? "think,thinking");
-        setStorageVersion((value) => value + 1);
+        activateSession(session);
       }
       setReady(true);
     });
-  }, []);
+  }, [activateSession]);
 
+  // 切换角色卡：回到该角色最近在写的那条剧情线（一条都没有时自动新建）
   useEffect(() => {
     if (!activeCharacterId) return;
-    const session = createOrGetStorySession(activeCharacterId);
-    setActiveSessionId(session.id);
-    activeSessionIdRef.current = session.id; // 同步更新，堵住生成完成回调的守卫空窗
-    setVisibleMessageCount(STORY_INITIAL_LOAD);
-    setMessages(loadStoryMessages(session.id));
-    setCustomCssDraft(session.customCSS || "");
-    setFoldTagsDraft(session.foldTags ?? "think,thinking");
-    setContextExcludedTagsDraft(session.contextExcludedTags ?? "think,thinking");
-    setStorageVersion((value) => value + 1);
-  }, [activeCharacterId]);
+    activateSession(createOrGetStorySession(activeCharacterId));
+  }, [activeCharacterId, activateSession]);
 
   // Listen for live CSS updates from 小卷
   useEffect(() => {
@@ -688,6 +706,54 @@ export function StoryApp({ onClose }: StoryAppProps) {
     markGenerating(activeSessionId, false);
   }
 
+  // ── 剧情线（同一角色卡可以并存多条） ──
+  function handleCreateStorySession() {
+    if (!activeCharacterId) return;
+    const existing = loadStorySessionsByCharacter(activeCharacterId);
+    const session = createStorySession(activeCharacterId, `剧情 ${existing.length + 1}`);
+    const source = existing[0];
+    if (source) {
+      // 沿用该角色当前的显示设置（主题 / 折叠标签 / 不进上下文标签），
+      // 只让剧情内容独立；自定义 CSS 不继承，避免串到新剧情线上
+      const inherited = updateStorySession(session.id, {
+        uiPrefs: { ...source.uiPrefs },
+        foldTags: source.foldTags,
+        contextExcludedTags: source.contextExcludedTags,
+      });
+      setPendingDeleteSessionId(null);
+      activateSession(inherited ?? session);
+      setDrawerOpen(false);
+      return;
+    }
+    setPendingDeleteSessionId(null);
+    activateSession(session);
+    setDrawerOpen(false);
+  }
+
+  function handleSwitchStorySession(session: StorySession) {
+    setPendingDeleteSessionId(null);
+    activateSession(session);
+    setDrawerOpen(false);
+  }
+
+  function handleDeleteStorySession(session: StorySession) {
+    if (!activeCharacterId) return;
+    const remaining = loadStorySessionsByCharacter(activeCharacterId)
+      .filter((item) => item.id !== session.id);
+    // 每个角色卡至少留一条剧情线，否则入口会变成空白页
+    if (remaining.length === 0) return;
+    const wasActive = session.id === activeSessionId;
+    cancelStoryGenerationRun(session.id);
+    markGenerating(session.id, false);
+    deleteStorySession(session.id);
+    setPendingDeleteSessionId(null);
+    if (wasActive) {
+      activateSession(remaining[0]);
+    } else {
+      setStorageVersion((value) => value + 1);
+    }
+  }
+
   function handleTouchStart(clientX: number) {
     dragStartXRef.current = clientX;
     dragDeltaXRef.current = 0;
@@ -903,6 +969,14 @@ export function StoryApp({ onClose }: StoryAppProps) {
   if (!currentCharacter || !currentSession) return null;
 
   const sessionScope = `.story-session-${currentSession.id}`;
+  const currentSessionIndex = Math.max(
+    0,
+    characterSessions.findIndex((session) => session.id === currentSession.id)
+  );
+  // 只有存在多条剧情线时才在阅读卡片上标出当前是哪一条，单条时不打扰
+  const currentSessionLabel = characterSessions.length > 1
+    ? getStorySessionLabel(currentSession, currentSessionIndex)
+    : "";
 
   return (
     <div
@@ -934,6 +1008,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                 className="story-character-chip"
                 data-active={character.id === activeCharacterId ? "true" : undefined}
                 onClick={() => {
+                  setPendingDeleteSessionId(null);
                   setActiveCharacterId(character.id);
                   setDrawerOpen(false);
                 }}
@@ -943,6 +1018,61 @@ export function StoryApp({ onClose }: StoryAppProps) {
               </button>
             ))}
           </div>
+        </div>
+
+        <div className="story-drawer-section">
+          <div className="story-drawer-eyebrow">
+            {currentCharacter ? `${currentCharacter.name} 的剧情线` : "剧情线"}
+          </div>
+          <div className="story-thread-list">
+            {characterSessions.map((session, index) => {
+              const isCurrent = session.id === activeSessionId;
+              const isPendingDelete = session.id === pendingDeleteSessionId;
+              const canDelete = characterSessions.length > 1;
+              return (
+                <div
+                  key={session.id}
+                  className="story-thread-item"
+                  data-active={isCurrent ? "true" : undefined}
+                >
+                  <button
+                    type="button"
+                    className="story-thread-main"
+                    onClick={() => handleSwitchStorySession(session)}
+                    aria-current={isCurrent ? "true" : undefined}
+                  >
+                    <span className="story-thread-title">{getStorySessionLabel(session, index)}</span>
+                    <span className="story-thread-preview">{getStorySessionPreview(session)}</span>
+                  </button>
+                  {canDelete ? (
+                    <button
+                      type="button"
+                      className="story-thread-delete"
+                      data-armed={isPendingDelete ? "true" : undefined}
+                      title={isPendingDelete ? "再点一次删除这条剧情线" : "删除这条剧情线"}
+                      aria-label={isPendingDelete ? "确认删除剧情线" : "删除这条剧情线"}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (session.id === pendingDeleteSessionId) {
+                          handleDeleteStorySession(session);
+                        } else {
+                          setPendingDeleteSessionId(session.id);
+                        }
+                      }}
+                    >
+                      {isPendingDelete ? "确认" : "删除"}
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+          {pendingDeleteSessionId ? (
+            <div className="story-thread-hint">删除会同时清空该剧情线的全部消息，且不可恢复。</div>
+          ) : null}
+          <button type="button" className="story-tool-btn story-thread-add" onClick={handleCreateStorySession}>
+            新建剧情线
+          </button>
         </div>
 
         <div className="story-drawer-section">
@@ -1067,6 +1197,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                 <div className="story-meta-body">
                   <div className="story-meta-title">本次阅读：《 {currentCharacter.name} 》</div>
                   <div className="story-meta-tags">
+                    {currentSessionLabel ? `${currentSessionLabel} · ` : ""}
                     {userIdentity?.name || "我"} x {currentCharacter.name}
                   </div>
                   <div className="story-meta-desc">

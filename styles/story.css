@@ -1024,3 +1024,72 @@
         }
         .story-inline-edit-btn-save { color: var(--c-story-accent, #7c6844); font-weight: 500; }
         .story-inline-edit-btn:disabled { opacity: 0.4; cursor: default; }
+        /* === 剧情线列表：同一角色卡可并存多条剧情 === */
+        .story-thread-list {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          margin-top: 8px;
+        }
+        .story-thread-item {
+          display: flex;
+          align-items: stretch;
+          gap: 4px;
+        }
+        .story-thread-main {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          padding: 9px 12px;
+          border: none;
+          border-radius: 0;
+          background: var(--c-story-panel, rgba(255, 255, 255, 0.5));
+          box-shadow: var(--story-paper-shadow-soft);
+          text-align: left;
+          cursor: pointer;
+          color: var(--c-story-text, #3a3b3c);
+          font-family: inherit;
+        }
+        .story-thread-item[data-active] .story-thread-main {
+          background: var(--c-story-panel-active, rgba(148, 163, 184, 0.12));
+        }
+        .story-thread-title {
+          font-size: calc(13px*var(--app-text-scale,1));
+          font-weight: 500;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .story-thread-item[data-active] .story-thread-title {
+          color: var(--c-story-heading, #1e293b);
+        }
+        .story-thread-preview {
+          font-size: calc(11px*var(--app-text-scale,1));
+          color: var(--c-story-sub, rgba(95, 82, 61, 0.72));
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .story-thread-delete {
+          flex: none;
+          padding: 0 10px;
+          border: none;
+          border-radius: 0;
+          background: var(--c-story-panel, rgba(255, 255, 255, 0.5));
+          color: var(--c-story-sub, rgba(95, 82, 61, 0.72));
+          font-size: calc(11px*var(--app-text-scale,1));
+          font-family: inherit;
+          cursor: pointer;
+        }
+        .story-thread-delete[data-armed] {
+          color: var(--c-danger, #e74c3c);
+          font-weight: 600;
+        }
+        .story-thread-hint {
+          margin-top: 6px;
+          font-size: calc(11px*var(--app-text-scale,1));
+          color: var(--c-danger, #e74c3c);
+        }
+        .story-thread-add { margin-top: 8px; }
